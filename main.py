@@ -15,10 +15,9 @@ WEBHOOK_URL = os.environ.get(
     "WEBHOOK_URL",
     "https://n8n.quanthum.cloud/webhook/cashback-organno-nummus",
 )
-# Horários UTC (BRT = UTC-3)
-RUN_EXPIRY_AT_UTC   = os.environ.get("RUN_EXPIRY_AT_UTC", "11:00")   # 08:00 BRT
-RUN_GENERATED_AT_UTC = os.environ.get("RUN_GENERATED_AT_UTC", "02:00")  # 23:00 BRT
-RUN_ON_START        = os.environ.get("RUN_ON_START", "false").lower() == "true"
+# 11:00 BRT = 14:00 UTC
+RUN_AT_UTC   = os.environ.get("RUN_AT_UTC", "14:00")
+RUN_ON_START = os.environ.get("RUN_ON_START", "false").lower() == "true"
 
 BASE_URL       = "https://api.production.nummus.com.br/v1"
 TARGET_DAYS    = [7, 3, 1]
@@ -169,11 +168,10 @@ if __name__ == "__main__":
         job_expiry_check()
         job_generated_check()
 
-    schedule.every().day.at(RUN_EXPIRY_AT_UTC).do(job_expiry_check)
-    schedule.every().day.at(RUN_GENERATED_AT_UTC).do(job_generated_check)
+    schedule.every().day.at(RUN_AT_UTC).do(job_expiry_check)
+    schedule.every().day.at(RUN_AT_UTC).do(job_generated_check)
 
-    log.info(f"⏰ Expiração agendada: {RUN_EXPIRY_AT_UTC} UTC (08:00 BRT)")
-    log.info(f"⏰ Cashbacks gerados: {RUN_GENERATED_AT_UTC} UTC (23:00 BRT)")
+    log.info(f"⏰ Ambos os jobs agendados para {RUN_AT_UTC} UTC (11:00 BRT)")
 
     while True:
         schedule.run_pending()
