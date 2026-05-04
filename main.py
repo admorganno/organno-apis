@@ -67,6 +67,20 @@ def parse_op_date(dh_operation: str) -> date:
     return datetime.strptime(dh_operation, "%d/%m/%Y %H:%M").date()
 
 
+def fetch_balance(customer_id: str) -> float | None:
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/cashback/amount",
+            headers=HEADERS,
+            params={"customer_id": customer_id},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("balance_available")
+    except Exception:
+        return None
+
+
 # ── Webhook ──────────────────────────────────────────────────────────────────
 def send_webhook(payload: dict) -> bool:
     try:
@@ -111,7 +125,8 @@ def job_expiry_check():
             if expiry not in targets:
                 continue
 
-            payload = {**cb, "periodo": targets[expiry]}
+            saldo = fetch_balance(cb["customer"]["id"])
+            payload = {**cb, "periodo": targets[expiry], "saldo_total": saldo}
             if send_webhook(payload):
                 sent += 1
                 log.info(
@@ -145,7 +160,8 @@ def job_generated_check():
     sent = errors = 0
     for cb in cashbacks:
         try:
-            payload = {**cb, "periodo": "cashback gerado"}
+            saldo = fetch_balance(cb["customer"]["id"])
+            payload = {**cb, "periodo": "cashback gerado", "saldo_total": saldo}
             if send_webhook(payload):
                 sent += 1
                 log.info(
