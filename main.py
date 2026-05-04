@@ -67,18 +67,33 @@ def parse_op_date(dh_operation: str) -> date:
     return datetime.strptime(dh_operation, "%d/%m/%Y %H:%M").date()
 
 
-def fetch_balance(customer_id: str) -> float | None:
-    try:
-        resp = requests.get(
-            f"{BASE_URL}/cashback/amount",
-            headers=HEADERS,
-            params={"customer_id": customer_id},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return resp.json().get("balance_available")
-    except Exception:
-        return None
+def calc_saldo_total(document_number: str, today: date) -> float:
+    """Saldo real = soma de (value_cashback - value_rescued) das transações ainda válidas.
+    Filtra pelo document_number do cliente para evitar varrer todos os registros.
+    Janela de 400 dias cobre cashbacks com data de expiração fixa (typeValidAt=DATA)."""
+    total = 0.0
+    page  = 0
+    start = (today - timedelta(days=400)).strftime("%Y-%m-%d")
+    end   = today.strftime("%Y-%m-%d")
+    while True:
+        params = {
+            "limit":   API_PAGE_LIMIT,
+            "offset":  page,
+            "period":  json.dumps({"start": start, "end": end}),
+            "customer": json.dumps({"document_number": document_number}),
+        }
+        data    = requests.get(f"{BASE_URL}/cashback", headers=HEADERS, params=params, timeout=30).json()
+        for cb in data.get("content", []):
+            vals      = [p["expiresIn"] for p in cb.get("products", []) if p.get("expiresIn")]
+            expiry    = parse_op_date(cb["dh_operation"]) + timedelta(days=min(vals) if vals else 40)
+            remaining = cb.get("value_cashback", 0) - cb.get("value_rescued", 0)
+            if expiry >= today and remaining > 0:
+                total += remaining
+        if not data.get("nextPage"):
+            break
+        page += 1
+        time.sleep(0.1)
+    return round(total, 2)
 
 
 # ── Webhook ──────────────────────────────────────────────────────────────────
@@ -125,7 +140,7 @@ def job_expiry_check():
             if expiry not in targets:
                 continue
 
-            saldo = fetch_balance(cb["customer"]["id"])
+            saldo = calc_saldo_total(cb["customer"]["document_number"], today)
             payload = {**cb, "periodo": targets[expiry], "saldo_total": saldo}
             if send_webhook(payload):
                 sent += 1
@@ -160,7 +175,7 @@ def job_generated_check():
     sent = errors = 0
     for cb in cashbacks:
         try:
-            saldo = fetch_balance(cb["customer"]["id"])
+            saldo = calc_saldo_total(cb["customer"]["document_number"], today)
             payload = {**cb, "periodo": "cashback gerado", "saldo_total": saldo}
             if send_webhook(payload):
                 sent += 1
