@@ -6,7 +6,6 @@ import time
 from datetime import date, datetime, timedelta
 
 import requests
-import schedule
 
 # ── Config ──────────────────────────────────────────────────────────────────
 API_KEY     = os.environ["NUMMUS_API_KEY"]
@@ -15,13 +14,10 @@ WEBHOOK_URL = os.environ.get(
     "WEBHOOK_URL",
     "https://n8n.quanthum.cloud/webhook/cashback-organno-nummus",
 )
-# 11:00 BRT = 14:00 UTC
-RUN_AT_UTC   = os.environ.get("RUN_AT_UTC", "14:00")
-RUN_ON_START = os.environ.get("RUN_ON_START", "false").lower() == "true"
 
 BASE_URL       = "https://api.production.nummus.com.br/v1"
 TARGET_DAYS    = [7, 3, 1]
-API_PAGE_LIMIT = 50   # máximo suportado pela API Nummus
+API_PAGE_LIMIT = 50
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,22 +34,20 @@ HEADERS = {
 
 
 # ── Nummus API ───────────────────────────────────────────────────────────────
-def _fetch_page(period_start: str, period_end: str, offset: int) -> dict:
-    params = {
-        "limit":  API_PAGE_LIMIT,
-        "offset": offset,
-        "period": json.dumps({"start": period_start, "end": period_end}),
-    }
-    resp = requests.get(f"{BASE_URL}/cashback", headers=HEADERS, params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def fetch_all_cashbacks(period_start: str, period_end: str) -> list[dict]:
+def fetch_all_cashbacks(period_start: str, period_end: str, customer_filter: dict | None = None) -> list[dict]:
     all_items: list[dict] = []
-    page = 0  # API usa offset como número de página (0, 1, 2...), não índice de registro
+    page = 0
     while True:
-        data    = _fetch_page(period_start, period_end, page)
+        params: dict = {
+            "limit":  API_PAGE_LIMIT,
+            "offset": page,
+            "period": json.dumps({"start": period_start, "end": period_end}),
+        }
+        if customer_filter:
+            params["customer"] = json.dumps(customer_filter)
+        resp = requests.get(f"{BASE_URL}/cashback", headers=HEADERS, params=params, timeout=30)
+        resp.raise_for_status()
+        data    = resp.json()
         content = data.get("content", [])
         all_items.extend(content)
         if not data.get("nextPage"):
@@ -68,31 +62,16 @@ def parse_op_date(dh_operation: str) -> date:
 
 
 def calc_saldo_total(document_number: str, today: date) -> float:
-    """Saldo real = soma de (value_cashback - value_rescued) das transações ainda válidas.
-    Filtra pelo document_number do cliente para evitar varrer todos os registros.
-    Janela de 400 dias cobre cashbacks com data de expiração fixa (typeValidAt=DATA)."""
     total = 0.0
-    page  = 0
     start = (today - timedelta(days=400)).strftime("%Y-%m-%d")
     end   = today.strftime("%Y-%m-%d")
-    while True:
-        params = {
-            "limit":   API_PAGE_LIMIT,
-            "offset":  page,
-            "period":  json.dumps({"start": start, "end": end}),
-            "customer": json.dumps({"document_number": document_number}),
-        }
-        data    = requests.get(f"{BASE_URL}/cashback", headers=HEADERS, params=params, timeout=30).json()
-        for cb in data.get("content", []):
-            vals      = [p["expiresIn"] for p in cb.get("products", []) if p.get("expiresIn")]
-            expiry    = parse_op_date(cb["dh_operation"]) + timedelta(days=min(vals) if vals else 40)
-            remaining = cb.get("value_cashback", 0) - cb.get("value_rescued", 0)
-            if expiry >= today and remaining > 0:
-                total += remaining
-        if not data.get("nextPage"):
-            break
-        page += 1
-        time.sleep(0.1)
+    cbs   = fetch_all_cashbacks(start, end, customer_filter={"document_number": document_number})
+    for cb in cbs:
+        vals      = [p["expiresIn"] for p in cb.get("products", []) if p.get("expiresIn")]
+        expiry    = parse_op_date(cb["dh_operation"]) + timedelta(days=min(vals) if vals else 40)
+        remaining = cb.get("value_cashback", 0) - cb.get("value_rescued", 0)
+        if expiry >= today and remaining > 0:
+            total += remaining
     return round(total, 2)
 
 
@@ -108,21 +87,12 @@ def send_webhook(payload: dict) -> bool:
 
 
 # ── Job 1: cashbacks prestes a expirar ──────────────────────────────────────
-def job_expiry_check():
-    today = date.today()
-    log.info(f"🔍 [EXPIRAÇÃO] Verificação iniciada — {today}")
+def job_expiry_check(today: date) -> None:
+    log.info(f"🔍 [EXPIRAÇÃO] Iniciado — {today}")
 
-    # Cobre expiresIn de 1 a 70 dias para os 3 alvos (1, 3 e 7 dias à frente)
     period_start = (today - timedelta(days=70)).strftime("%Y-%m-%d")
     period_end   = today.strftime("%Y-%m-%d")
-    log.info(f"📅 Consultando operações de {period_start} até {period_end}")
-
-    try:
-        cashbacks = fetch_all_cashbacks(period_start, period_end)
-    except Exception as e:
-        log.error(f"❌ Erro ao buscar cashbacks: {e}")
-        return
-
+    cashbacks    = fetch_all_cashbacks(period_start, period_end)
     log.info(f"📦 {len(cashbacks)} cashbacks no período")
 
     targets: dict[date, str] = {
@@ -139,71 +109,49 @@ def job_expiry_check():
             expiry = parse_op_date(cb["dh_operation"]) + timedelta(days=min(vals))
             if expiry not in targets:
                 continue
-
-            saldo = calc_saldo_total(cb["customer"]["document_number"], today)
+            saldo   = calc_saldo_total(cb["customer"]["document_number"], today)
             payload = {**cb, "periodo": targets[expiry], "saldo_total": saldo}
             if send_webhook(payload):
                 sent += 1
-                log.info(
-                    f"✅ {cb['customer']['name']} | "
-                    f"R$ {cb['value_cashback']:.2f} | "
-                    f"vence em {targets[expiry]} ({expiry})"
-                )
+                log.info(f"✅ {cb['customer']['name']} | R$ {cb['value_cashback']:.2f} | {targets[expiry]}")
             else:
                 errors += 1
         except Exception as e:
             log.error(f"⚠️  Erro no cashback {cb.get('id')}: {e}")
             errors += 1
 
-    log.info(f"🏁 [EXPIRAÇÃO] Concluído — enviados: {sent} | erros: {errors}")
+    log.info(f"🏁 [EXPIRAÇÃO] enviados: {sent} | erros: {errors}")
 
 
 # ── Job 2: cashbacks gerados ontem ──────────────────────────────────────────
-def job_generated_check():
-    # Roda às 23h BRT → captura todos os cashbacks criados no dia anterior
-    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-    log.info(f"🛒 [GERADOS] Buscando cashbacks criados em {yesterday}")
+def job_generated_check(today: date) -> None:
+    yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    log.info(f"🛒 [GERADOS] Buscando cashbacks de {yesterday}")
 
-    try:
-        cashbacks = fetch_all_cashbacks(yesterday, yesterday)
-    except Exception as e:
-        log.error(f"❌ Erro ao buscar cashbacks gerados: {e}")
-        return
-
+    cashbacks = fetch_all_cashbacks(yesterday, yesterday)
     log.info(f"📦 {len(cashbacks)} cashbacks gerados em {yesterday}")
 
     sent = errors = 0
     for cb in cashbacks:
         try:
-            saldo = calc_saldo_total(cb["customer"]["document_number"], today)
+            saldo   = calc_saldo_total(cb["customer"]["document_number"], today)
             payload = {**cb, "periodo": "cashback gerado", "saldo_total": saldo}
             if send_webhook(payload):
                 sent += 1
-                log.info(
-                    f"✅ {cb['customer']['name']} | "
-                    f"R$ {cb['value_cashback']:.2f} | gerado em {yesterday}"
-                )
+                log.info(f"✅ {cb['customer']['name']} | R$ {cb['value_cashback']:.2f} | gerado em {yesterday}")
             else:
                 errors += 1
         except Exception as e:
             log.error(f"⚠️  Erro no cashback {cb.get('id')}: {e}")
             errors += 1
 
-    log.info(f"🏁 [GERADOS] Concluído — enviados: {sent} | erros: {errors}")
+    log.info(f"🏁 [GERADOS] enviados: {sent} | erros: {errors}")
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────
+# ── Entry point — roda e encerra (Railway Cron Job) ──────────────────────────
 if __name__ == "__main__":
-    if RUN_ON_START:
-        log.info("▶️  RUN_ON_START=true — executando ambos os jobs agora")
-        job_expiry_check()
-        job_generated_check()
-
-    schedule.every().day.at(RUN_AT_UTC).do(job_expiry_check)
-    schedule.every().day.at(RUN_AT_UTC).do(job_generated_check)
-
-    log.info(f"⏰ Ambos os jobs agendados para {RUN_AT_UTC} UTC (11:00 BRT)")
-
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    today = date.today()
+    log.info(f"🚀 Iniciando jobs — {today}")
+    job_expiry_check(today)
+    job_generated_check(today)
+    log.info("✅ Todos os jobs concluídos.")
