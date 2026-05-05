@@ -27,36 +27,56 @@ def load_durations() -> dict:
 
 
 def connect_db():
-    # Railway pode estar dormindo — tenta acordar e reconecta
+    # Primeira conexão acorda o Railway (pode falhar); segunda garante os dados
+    log.info("🔌 Acordando banco...")
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER,
+            password=DB_PASSWORD, dbname=DB_NAME, connect_timeout=20,
+        )
+        conn.cursor().execute("SELECT 1")
+        conn.close()
+        log.info("✓ Banco acordado")
+    except Exception as e:
+        log.warning(f"Wake-up falhou (normal se estava dormindo): {e}")
+
+    time.sleep(6)
+
     for attempt in range(3):
         try:
             conn = psycopg2.connect(
-                host=DB_HOST,
-                port=DB_PORT,
-                user=DB_USER,
-                password=DB_PASSWORD,
-                dbname=DB_NAME,
-                connect_timeout=20,
+                host=DB_HOST, port=DB_PORT, user=DB_USER,
+                password=DB_PASSWORD, dbname=DB_NAME, connect_timeout=20,
             )
             return conn
         except psycopg2.OperationalError as e:
-            log.warning(f"Tentativa {attempt + 1} falhou: {e}")
+            log.warning(f"Tentativa {attempt + 1}/3 falhou: {e}")
             if attempt < 2:
                 time.sleep(8)
+
     raise RuntimeError("Não foi possível conectar ao banco após 3 tentativas")
 
 
-def fetch_expiring_today(cur, codes: list[str], today: date) -> list[dict]:
-    """
-    Busca compras onde data_compra + dias_produto = hoje.
-    Faz a conta no Python pra evitar query gigante por codigo.
-    """
-    # Agrupa códigos por quantidade de dias pra minimizar queries
+def build_whatsapp_number(ddd_cel: str, celular: str, ddd_tel: str, telefone: str) -> str | None:
+    """Monta número completo para WhatsApp. Celular tem prioridade sobre telefone."""
+    cel = (celular or "").strip().replace("-", "").replace(" ", "")
+    ddd_c = (ddd_cel or "").strip()
+    if ddd_c and cel:
+        return f"55{ddd_c}{cel}"
+
+    tel = (telefone or "").strip().replace("-", "").replace(" ", "")
+    ddd_t = (ddd_tel or "").strip()
+    if ddd_t and tel:
+        return f"55{ddd_t}{tel}"
+
+    return None
+
+
+def fetch_expiring_today(cur, durations: dict, today: date) -> list[dict]:
+    # Agrupa códigos por dias para minimizar queries ao banco
     by_days: dict[int, list[str]] = {}
-    durations = load_durations()
-    for code in codes:
-        dias = durations[code]["dias"]
-        by_days.setdefault(dias, []).append(code)
+    for code, info in durations.items():
+        by_days.setdefault(info["dias"], []).append(code)
 
     results = []
     for dias, group_codes in by_days.items():
@@ -68,11 +88,13 @@ def fetch_expiring_today(cur, codes: list[str], today: date) -> list[dict]:
                 dv.quantidade,
                 v.codigo_venda,
                 v.cpf_cliente,
-                v.data AS data_compra,
-                c.nome,
+                v.data            AS data_compra,
+                c.nome            AS cliente_nome,
                 c.ddd_celular,
                 c.celular,
-                c.email
+                c.ddd_telefone,
+                c.telefone,
+                c.email           AS cliente_email
             FROM detalhes_vendas dv
             JOIN vendas v ON v.codigo_venda = dv.codigo_venda
             LEFT JOIN clientes c ON c.cpf = v.cpf_cliente
@@ -86,6 +108,8 @@ def fetch_expiring_today(cur, codes: list[str], today: date) -> list[dict]:
         for row in cur.fetchall():
             codigo = row[0].strip()
             info = durations.get(codigo, {})
+            ddd_cel, celular, ddd_tel, telefone = row[6], row[7], row[8], row[9]
+            whatsapp = build_whatsapp_number(ddd_cel, celular, ddd_tel, telefone)
             results.append(
                 {
                     "codigo_produto": codigo,
@@ -97,9 +121,8 @@ def fetch_expiring_today(cur, codes: list[str], today: date) -> list[dict]:
                     "data_compra": str(row[4]),
                     "data_expiracao": str(today),
                     "cliente_nome": row[5],
-                    "cliente_ddd": row[6],
-                    "cliente_celular": row[7],
-                    "cliente_email": row[8],
+                    "cliente_whatsapp": whatsapp,
+                    "cliente_email": row[10],
                 }
             )
     return results
@@ -120,12 +143,11 @@ def run():
     log.info(f"🚀 Iniciando verificação de expiração — {today}")
 
     durations = load_durations()
-    codes = list(durations.keys())
 
     conn = connect_db()
     cur = conn.cursor()
 
-    expiring = fetch_expiring_today(cur, codes, today)
+    expiring = fetch_expiring_today(cur, durations, today)
     cur.close()
     conn.close()
 
@@ -136,7 +158,7 @@ def run():
     for item in expiring:
         log.info(
             f"  → venda {item['codigo_venda']} | {item['nome_produto']} | "
-            f"cliente: {item['cliente_nome']} {item['cliente_ddd']}{item['cliente_celular']}"
+            f"cliente: {item['cliente_nome']} | whatsapp: {item['cliente_whatsapp']}"
         )
         if send_webhook(item):
             ok += 1
