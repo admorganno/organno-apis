@@ -116,6 +116,7 @@ def job_expiry_check(today: date) -> None:
                 log.info(f"✅ {cb['customer']['name']} | R$ {cb['value_cashback']:.2f} | {targets[expiry]}")
             else:
                 errors += 1
+            time.sleep(20)
         except Exception as e:
             log.error(f"⚠️  Erro no cashback {cb.get('id')}: {e}")
             errors += 1
@@ -141,6 +142,7 @@ def job_generated_check(today: date) -> None:
                 log.info(f"✅ {cb['customer']['name']} | R$ {cb['value_cashback']:.2f} | gerado em {yesterday}")
             else:
                 errors += 1
+            time.sleep(20)
         except Exception as e:
             log.error(f"⚠️  Erro no cashback {cb.get('id')}: {e}")
             errors += 1
