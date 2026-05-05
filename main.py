@@ -148,10 +148,37 @@ def job_generated_check(today: date) -> None:
     log.info(f"🏁 [GERADOS] enviados: {sent} | erros: {errors}")
 
 
+# ── Wake-up ──────────────────────────────────────────────────────────────────
+def wake_up_api() -> None:
+    """Primeira requisição acorda o serviço (pode falhar); segunda garante resposta."""
+    log.info("🔌 Acordando API Nummus...")
+    try:
+        requests.get(f"{BASE_URL}/cashback", headers=HEADERS, params={"limit": 1}, timeout=20)
+        log.info("✓ API acordada")
+    except Exception as e:
+        log.warning(f"Wake-up falhou (normal se estava dormindo): {e}")
+
+    time.sleep(6)
+
+    for attempt in range(3):
+        try:
+            resp = requests.get(f"{BASE_URL}/cashback", headers=HEADERS, params={"limit": 1}, timeout=20)
+            resp.raise_for_status()
+            log.info("✓ API pronta")
+            return
+        except Exception as e:
+            log.warning(f"Tentativa {attempt + 1}/3 falhou: {e}")
+            if attempt < 2:
+                time.sleep(8)
+
+    raise RuntimeError("API Nummus não respondeu após 3 tentativas")
+
+
 # ── Entry point — roda e encerra (Railway Cron Job) ──────────────────────────
 if __name__ == "__main__":
     today = date.today()
     log.info(f"🚀 Iniciando jobs — {today}")
+    wake_up_api()
     job_expiry_check(today)
     job_generated_check(today)
     log.info("✅ Todos os jobs concluídos.")
