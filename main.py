@@ -16,8 +16,9 @@ WEBHOOK_URL = os.environ.get(
 )
 
 BASE_URL       = "https://api.production.nummus.com.br/v1"
-TARGET_DAYS    = [7, 3, 1]
+TARGET_DAYS    = [15, 3]
 API_PAGE_LIMIT = 50
+MIN_ACTIVE_BALANCE = 30.0
 BRT            = timezone(timedelta(hours=-3))
 SENT_FILE      = "/tmp/sent_today.json"
 
@@ -108,6 +109,74 @@ def calc_saldo_total(document_number: str, today: date) -> float:
     return round(total, 2)
 
 
+def build_customer_expiry_targets(today: date) -> list[dict]:
+    """Agrupa clientes com saldo ativo minimo e vencimentos nos periodos alvo."""
+    start = (today - timedelta(days=400)).strftime("%Y-%m-%d")
+    end   = today.strftime("%Y-%m-%d")
+    cashbacks = fetch_all_cashbacks(start, end)
+
+    customers: dict[str, dict] = {}
+    for cb in cashbacks:
+        customer = cb.get("customer") or {}
+        doc = customer.get("document_number")
+        if not doc:
+            continue
+
+        vals = [p["expiresIn"] for p in cb.get("products", []) if p.get("expiresIn")]
+        expiry = parse_op_date(cb["dh_operation"]) + timedelta(days=min(vals) if vals else 40)
+        remaining = cb.get("value_cashback", 0) - cb.get("value_rescued", 0)
+
+        customer_bucket = customers.setdefault(
+            doc,
+            {
+                "customer": customer,
+                "saldo_total": 0.0,
+                "targets": {},
+            },
+        )
+
+        if expiry >= today and remaining > 0:
+            customer_bucket["saldo_total"] += remaining
+
+        days_until_expiry = (expiry - today).days
+        if days_until_expiry in TARGET_DAYS and remaining > 0:
+            target = customer_bucket["targets"].setdefault(
+                days_until_expiry,
+                {
+                    "cashbacks": [],
+                    "value_to_expire": 0.0,
+                    "next_expiry": expiry,
+                },
+            )
+            target["cashbacks"].append(cb)
+            target["value_to_expire"] += remaining
+            if expiry < target["next_expiry"]:
+                target["next_expiry"] = expiry
+
+    eligible_customers: list[dict] = []
+    for doc, data in customers.items():
+        saldo_total = round(data["saldo_total"], 2)
+        if saldo_total < MIN_ACTIVE_BALANCE:
+            continue
+
+        for days_until_expiry, target_data in data["targets"].items():
+            eligible_customers.append(
+                {
+                    "document_number": doc,
+                    "customer": data["customer"],
+                    "periodo": f"{days_until_expiry} dias",
+                    "dias_para_expirar": days_until_expiry,
+                    "saldo_total": saldo_total,
+                    "value_to_expire": round(target_data["value_to_expire"], 2),
+                    "expires_at": target_data["next_expiry"].isoformat(),
+                    "cashbacks_alvo": target_data["cashbacks"],
+                    "cashback_count": len(target_data["cashbacks"]),
+                }
+            )
+
+    return eligible_customers
+
+
 # ── Webhook ──────────────────────────────────────────────────────────────────
 def send_webhook(payload: dict) -> bool:
     try:
@@ -122,46 +191,34 @@ def send_webhook(payload: dict) -> bool:
 # ── Job 1: cashbacks prestes a expirar ──────────────────────────────────────
 def job_expiry_check(today: date, sent: set[tuple[str, str]], today_str: str) -> None:
     log.info(f"🔍 [EXPIRAÇÃO] Iniciado — {today}")
-
-    period_start = (today - timedelta(days=70)).strftime("%Y-%m-%d")
-    period_end   = today.strftime("%Y-%m-%d")
-    cashbacks    = fetch_all_cashbacks(period_start, period_end)
-    log.info(f"📦 {len(cashbacks)} cashbacks no período")
-
-    targets: dict[date, str] = {
-        today + timedelta(days=d): ("24 horas" if d == 1 else f"{d} dias")
-        for d in TARGET_DAYS
-    }
+    customers = build_customer_expiry_targets(today)
+    log.info(f"👥 {len(customers)} clientes elegíveis com saldo ativo >= R$ {MIN_ACTIVE_BALANCE:.2f}")
 
     ok = skipped = errors = 0
-    for cb in cashbacks:
+    for customer_event in customers:
         try:
-            vals = [p["expiresIn"] for p in cb.get("products", []) if p.get("expiresIn")]
-            if not vals:
-                continue
-            expiry = parse_op_date(cb["dh_operation"]) + timedelta(days=min(vals))
-            if expiry not in targets:
-                continue
-
-            periodo = targets[expiry]
-            doc     = cb["customer"]["document_number"]
+            doc = customer_event["document_number"]
+            periodo = customer_event["periodo"]
+            customer_name = customer_event["customer"].get("name", doc)
 
             if (doc, periodo) in sent:
-                log.info(f"⏭️  Já enviado hoje: {cb['customer']['name']} | {periodo}")
+                log.info(f"⏭️  Já enviado hoje: {customer_name} | {periodo}")
                 skipped += 1
                 continue
 
-            saldo   = calc_saldo_total(doc, today)
-            payload = {**cb, "periodo": periodo, "saldo_total": saldo}
+            payload = dict(customer_event)
             if send_webhook(payload):
                 mark_sent(sent, doc, periodo, today_str)
                 ok += 1
-                log.info(f"✅ {cb['customer']['name']} | R$ {cb['value_cashback']:.2f} | {periodo}")
+                log.info(
+                    f"✅ {customer_name} | saldo ativo R$ {customer_event['saldo_total']:.2f} | "
+                    f"vence em {periodo}"
+                )
             else:
                 errors += 1
             time.sleep(20)
         except Exception as e:
-            log.error(f"⚠️  Erro no cashback {cb.get('id')}: {e}")
+            log.error(f"⚠️  Erro no cliente {customer_event.get('document_number')}: {e}")
             errors += 1
 
     log.info(f"🏁 [EXPIRAÇÃO] enviados: {ok} | já enviados: {skipped} | erros: {errors}")
@@ -187,6 +244,14 @@ def job_generated_check(today: date, sent: set[tuple[str, str]], today_str: str)
                 continue
 
             saldo   = calc_saldo_total(doc, today)
+            if saldo < MIN_ACTIVE_BALANCE:
+                log.info(
+                    f"⏭️  Saldo ativo abaixo do mínimo: {cb['customer']['name']} | "
+                    f"R$ {saldo:.2f} < R$ {MIN_ACTIVE_BALANCE:.2f}"
+                )
+                skipped += 1
+                continue
+
             payload = {**cb, "periodo": periodo, "saldo_total": saldo}
             if send_webhook(payload):
                 mark_sent(sent, doc, periodo, today_str)
