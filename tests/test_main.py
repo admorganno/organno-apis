@@ -98,6 +98,38 @@ class BuildCustomerExpiryTargetsTests(unittest.TestCase):
 
         self.assertNotIn("333", events_by_doc)
 
+    def test_prioritizes_3_day_window_over_15_day_window_for_same_customer(self) -> None:
+        today = date(2026, 5, 6)
+        cashbacks = [
+            make_cashback(
+                cashback_id="cb-15",
+                document_number="111",
+                name="Cliente Prioridade",
+                dh_operation="06/04/2026 10:00",
+                expires_in=45,
+                value_cashback=20.0,
+            ),
+            make_cashback(
+                cashback_id="cb-3",
+                document_number="111",
+                name="Cliente Prioridade",
+                dh_operation="29/04/2026 10:00",
+                expires_in=10,
+                value_cashback=15.0,
+            ),
+        ]
+
+        with patch.object(main, "fetch_all_cashbacks", return_value=cashbacks):
+            events = main.build_customer_expiry_targets(today)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["document_number"], "111")
+        self.assertEqual(events[0]["periodo"], "3 dias")
+        self.assertEqual(events[0]["dias_para_expirar"], 3)
+        self.assertEqual(events[0]["saldo_total"], 35.0)
+        self.assertEqual(events[0]["value_to_expire"], 15.0)
+        self.assertEqual(events[0]["cashback_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

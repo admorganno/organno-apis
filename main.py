@@ -19,6 +19,7 @@ BASE_URL       = "https://api.production.nummus.com.br/v1"
 TARGET_DAYS    = [15, 3]
 API_PAGE_LIMIT = 50
 MIN_ACTIVE_BALANCE = 30.0
+TARGET_PRIORITY = sorted(TARGET_DAYS)
 BRT            = timezone(timedelta(hours=-3))
 SENT_FILE      = "/tmp/sent_today.json"
 
@@ -159,20 +160,27 @@ def build_customer_expiry_targets(today: date) -> list[dict]:
         if saldo_total < MIN_ACTIVE_BALANCE:
             continue
 
-        for days_until_expiry, target_data in data["targets"].items():
-            eligible_customers.append(
-                {
-                    "document_number": doc,
-                    "customer": data["customer"],
-                    "periodo": f"{days_until_expiry} dias",
-                    "dias_para_expirar": days_until_expiry,
-                    "saldo_total": saldo_total,
-                    "value_to_expire": round(target_data["value_to_expire"], 2),
-                    "expires_at": target_data["next_expiry"].isoformat(),
-                    "cashbacks_alvo": target_data["cashbacks"],
-                    "cashback_count": len(target_data["cashbacks"]),
-                }
-            )
+        prioritized_days = next(
+            (days for days in TARGET_PRIORITY if days in data["targets"]),
+            None,
+        )
+        if prioritized_days is None:
+            continue
+
+        target_data = data["targets"][prioritized_days]
+        eligible_customers.append(
+            {
+                "document_number": doc,
+                "customer": data["customer"],
+                "periodo": f"{prioritized_days} dias",
+                "dias_para_expirar": prioritized_days,
+                "saldo_total": saldo_total,
+                "value_to_expire": round(target_data["value_to_expire"], 2),
+                "expires_at": target_data["next_expiry"].isoformat(),
+                "cashbacks_alvo": target_data["cashbacks"],
+                "cashback_count": len(target_data["cashbacks"]),
+            }
+        )
 
     return eligible_customers
 
