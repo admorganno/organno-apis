@@ -18,7 +18,7 @@ DB_NAME = os.environ.get("DB_NAME", "railway")
 WEBHOOK_URL             = os.environ["WEBHOOK_URL"]
 WEBHOOK_ANIVERSARIO_URL = os.environ.get(
     "WEBHOOK_ANIVERSARIO_URL",
-    "https://n8n.quanthum.cloud/webhook/mapeamento-organno",
+    "https://n8n.quanthum.cloud/webhook/organno-aniver",
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
