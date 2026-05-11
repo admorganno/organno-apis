@@ -268,29 +268,11 @@ def send_webhook(payload: dict) -> bool:
         return False
 
 
-def run():
-    today = date.today()
-    log.info(f"🚀 Iniciando verificação — {today}")
-
-    durations = load_durations()
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    expiring     = fetch_expiring_today(cur, durations, today)
-    birthdays    = fetch_birthdays_today(cur, today)
-    reengajamento = fetch_reengajamento(cur, durations, today)
-
-    cur.close()
-    conn.close()
-
-    log.info(f"📦 {len(expiring)} compras expiram hoje")
-    log.info(f"🎂 {len(birthdays)} aniversariantes hoje")
-    log.info(f"🔁 {len(reengajamento)} clientes para reengajamento")
-
+def run_expiry(cur, durations: dict, today: date) -> tuple[int, int]:
+    items = fetch_expiring_today(cur, durations, today)
+    log.info(f"📦 {len(items)} compras expiram hoje")
     ok = fail = 0
-
-    for item in expiring:
+    for item in items:
         log.info(
             f"  → venda {item['codigo_venda']} | {item['nome_produto']} | "
             f"cliente: {item['cliente_nome']} | whatsapp: {item['cliente_whatsapp']}"
@@ -299,18 +281,14 @@ def run():
             ok += 1
         else:
             fail += 1
+    return ok, fail
 
-    for item in birthdays:
-        log.info(f"  🎂 {item['nome']} | telefone: {item['telefone']}")
-        try:
-            resp = requests.post(WEBHOOK_ANIVERSARIO_URL, json=item, timeout=15)
-            resp.raise_for_status()
-            ok += 1
-        except requests.RequestException as e:
-            log.error(f"Webhook aniversário falhou para {item['nome']}: {e}")
-            fail += 1
 
-    for item in reengajamento:
+def run_reengajamento(cur, durations: dict, today: date) -> tuple[int, int]:
+    items = fetch_reengajamento(cur, durations, today)
+    log.info(f"🔁 {len(items)} clientes para reengajamento")
+    ok = fail = 0
+    for item in items:
         log.info(f"  🔁 {item['nome']} | telefone: {item['telefone']}")
         try:
             resp = requests.post(WEBHOOK_REENGAJAMENTO_URL, json=item, timeout=15)
@@ -319,9 +297,47 @@ def run():
         except requests.RequestException as e:
             log.error(f"Webhook reengajamento falhou para {item['nome']}: {e}")
             fail += 1
+    return ok, fail
 
-    log.info(f"✅ {ok} webhooks enviados | ❌ {fail} falhas")
+
+def run_aniversario(cur, today: date) -> tuple[int, int]:
+    items = fetch_birthdays_today(cur, today)
+    log.info(f"🎂 {len(items)} aniversariantes hoje")
+    ok = fail = 0
+    for item in items:
+        log.info(f"  🎂 {item['nome']} | telefone: {item['telefone']}")
+        try:
+            resp = requests.post(WEBHOOK_ANIVERSARIO_URL, json=item, timeout=15)
+            resp.raise_for_status()
+            ok += 1
+        except requests.RequestException as e:
+            log.error(f"Webhook aniversário falhou para {item['nome']}: {e}")
+            fail += 1
+    return ok, fail
 
 
 if __name__ == "__main__":
-    run()
+    job = os.environ.get("JOB", "").strip().lower()
+    today = date.today()
+    log.info(f"🚀 Iniciando job='{job or 'todos'}' — {today}")
+
+    durations = load_durations()
+    conn = connect_db()
+    c = conn.cursor()
+
+    ok = fail = 0
+    if job == "expiry":
+        ok, fail = run_expiry(c, durations, today)
+    elif job == "reengajamento":
+        ok, fail = run_reengajamento(c, durations, today)
+    elif job == "aniversario":
+        ok, fail = run_aniversario(c, today)
+    else:
+        o1, f1 = run_expiry(c, durations, today)
+        o2, f2 = run_reengajamento(c, durations, today)
+        o3, f3 = run_aniversario(c, today)
+        ok, fail = o1 + o2 + o3, f1 + f2 + f3
+
+    c.close()
+    conn.close()
+    log.info(f"✅ {ok} webhooks enviados | ❌ {fail} falhas")

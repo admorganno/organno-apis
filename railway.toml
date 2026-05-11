@@ -2,5 +2,6 @@
 builder = "nixpacks"
 
 [deploy]
+# aniversario: 08:00 BRT | expiry: 0 13 * * * (10:00 BRT) | reengajamento: 0 17 * * * (14:00 BRT)
 cronSchedule = "0 11 * * *"
 startCommand = "python main.py"
