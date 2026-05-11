@@ -44,19 +44,19 @@ def connect_db():
     except Exception as e:
         log.warning(f"Wake-up falhou (normal se estava dormindo): {e}")
 
-    time.sleep(6)
+    time.sleep(20)
 
     for attempt in range(3):
         try:
             conn = psycopg2.connect(
                 host=DB_HOST, port=DB_PORT, user=DB_USER,
-                password=DB_PASSWORD, dbname=DB_NAME, connect_timeout=20,
+                password=DB_PASSWORD, dbname=DB_NAME, connect_timeout=30,
             )
             return conn
         except psycopg2.OperationalError as e:
             log.warning(f"Tentativa {attempt + 1}/3 falhou: {e}")
             if attempt < 2:
-                time.sleep(8)
+                time.sleep(15)
 
     raise RuntimeError("Não foi possível conectar ao banco após 3 tentativas")
 
