@@ -132,6 +132,22 @@ def fetch_expiring_today(cur, durations: dict, today: date) -> list[dict]:
     return results
 
 
+VOUCHER_TIERS = [
+    (3000, 150),
+    (2000, 100),
+    (1000,  70),
+    ( 500,  50),
+    ( 200,  30),
+]
+
+
+def calcular_voucher(total_gasto: float) -> int:
+    for minimo, valor in VOUCHER_TIERS:
+        if total_gasto >= minimo:
+            return valor
+    return 0
+
+
 def fetch_birthdays_today(cur, today: date) -> list[dict]:
     cur.execute(
         """
@@ -140,19 +156,22 @@ def fetch_birthdays_today(cur, today: date) -> list[dict]:
             c.ddd_celular,
             c.celular,
             c.ddd_telefone,
-            c.telefone
+            c.telefone,
+            COALESCE(SUM(v.valor_pago), 0) AS total_gasto
         FROM clientes c
+        LEFT JOIN vendas v ON v.cpf_cliente = c.cpf AND v.status = 'Válido'
         WHERE EXTRACT(MONTH FROM c.data_nascimento) = %s
           AND EXTRACT(DAY   FROM c.data_nascimento) = %s
           AND EXTRACT(YEAR  FROM c.data_nascimento) >= 1920
           AND c.data_nascimento IS NOT NULL
+        GROUP BY c.nome, c.ddd_celular, c.celular, c.ddd_telefone, c.telefone
         ORDER BY c.nome
         """,
         (today.month, today.day),
     )
     results = []
     for row in cur.fetchall():
-        nome, ddd_cel, celular, ddd_tel, telefone = row
+        nome, ddd_cel, celular, ddd_tel, telefone, total_gasto = row
         telefone_completo = build_whatsapp_number(ddd_cel, celular, ddd_tel, telefone)
         if not telefone_completo:
             continue
@@ -161,6 +180,7 @@ def fetch_birthdays_today(cur, today: date) -> list[dict]:
                 "event": "aniversario",
                 "nome": nome,
                 "telefone": telefone_completo,
+                "voucher": calcular_voucher(float(total_gasto)),
             }
         )
     return results
