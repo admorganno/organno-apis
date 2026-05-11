@@ -15,7 +15,11 @@ DB_PORT = int(os.environ.get("DB_PORT", 5432))
 DB_USER = os.environ["DB_USER"]
 DB_PASSWORD = os.environ["DB_PASSWORD"]
 DB_NAME = os.environ.get("DB_NAME", "railway")
-WEBHOOK_URL = os.environ["WEBHOOK_URL"]
+WEBHOOK_URL             = os.environ["WEBHOOK_URL"]
+WEBHOOK_ANIVERSARIO_URL = os.environ.get(
+    "WEBHOOK_ANIVERSARIO_URL",
+    "https://n8n.quanthum.cloud/webhook/mapeamento-organno",
+)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DURATIONS_FILE = os.path.join(SCRIPT_DIR, "product_durations.json")
@@ -128,6 +132,40 @@ def fetch_expiring_today(cur, durations: dict, today: date) -> list[dict]:
     return results
 
 
+def fetch_birthdays_today(cur, today: date) -> list[dict]:
+    cur.execute(
+        """
+        SELECT
+            c.nome,
+            c.ddd_celular,
+            c.celular,
+            c.ddd_telefone,
+            c.telefone
+        FROM clientes c
+        WHERE EXTRACT(MONTH FROM c.data_nascimento) = %s
+          AND EXTRACT(DAY   FROM c.data_nascimento) = %s
+          AND EXTRACT(YEAR  FROM c.data_nascimento) >= 1920
+          AND c.data_nascimento IS NOT NULL
+        ORDER BY c.nome
+        """,
+        (today.month, today.day),
+    )
+    results = []
+    for row in cur.fetchall():
+        nome, ddd_cel, celular, ddd_tel, telefone = row
+        telefone_completo = build_whatsapp_number(ddd_cel, celular, ddd_tel, telefone)
+        if not telefone_completo:
+            continue
+        results.append(
+            {
+                "event": "aniversario",
+                "nome": nome,
+                "telefone": telefone_completo,
+            }
+        )
+    return results
+
+
 def send_webhook(payload: dict) -> bool:
     try:
         resp = requests.post(WEBHOOK_URL, json=payload, timeout=15)
@@ -140,21 +178,24 @@ def send_webhook(payload: dict) -> bool:
 
 def run():
     today = date.today()
-    log.info(f"🚀 Iniciando verificação de expiração — {today}")
+    log.info(f"🚀 Iniciando verificação — {today}")
 
     durations = load_durations()
 
     conn = connect_db()
     cur = conn.cursor()
 
-    expiring = fetch_expiring_today(cur, durations, today)
+    expiring  = fetch_expiring_today(cur, durations, today)
+    birthdays = fetch_birthdays_today(cur, today)
+
     cur.close()
     conn.close()
 
     log.info(f"📦 {len(expiring)} compras expiram hoje")
+    log.info(f"🎂 {len(birthdays)} aniversariantes hoje")
 
-    ok = 0
-    fail = 0
+    ok = fail = 0
+
     for item in expiring:
         log.info(
             f"  → venda {item['codigo_venda']} | {item['nome_produto']} | "
@@ -163,6 +204,16 @@ def run():
         if send_webhook(item):
             ok += 1
         else:
+            fail += 1
+
+    for item in birthdays:
+        log.info(f"  🎂 {item['nome']} | telefone: {item['telefone']}")
+        try:
+            resp = requests.post(WEBHOOK_ANIVERSARIO_URL, json=item, timeout=15)
+            resp.raise_for_status()
+            ok += 1
+        except requests.RequestException as e:
+            log.error(f"Webhook aniversário falhou para {item['nome']}: {e}")
             fail += 1
 
     log.info(f"✅ {ok} webhooks enviados | ❌ {fail} falhas")
