@@ -175,12 +175,15 @@ def fetch_birthdays_today(cur, today: date) -> list[dict]:
         telefone_completo = build_whatsapp_number(ddd_cel, celular, ddd_tel, telefone)
         if not telefone_completo:
             continue
+        voucher = calcular_voucher(float(total_gasto))
+        if voucher == 0:
+            continue
         results.append(
             {
                 "event": "aniversario",
                 "nome": nome,
                 "telefone": telefone_completo,
-                "voucher": calcular_voucher(float(total_gasto)),
+                "voucher": voucher,
             }
         )
     return results
