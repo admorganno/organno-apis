@@ -20,6 +20,12 @@ WEBHOOK_ANIVERSARIO_URL = os.environ.get(
     "WEBHOOK_ANIVERSARIO_URL",
     "https://n8n.quanthum.cloud/webhook/organno-aniver",
 )
+WEBHOOK_REENGAJAMENTO_URL = os.environ.get(
+    "WEBHOOK_REENGAJAMENTO_URL",
+    "https://n8n.quanthum.cloud/webhook/organno-reengajamento",
+)
+
+REENGAJAMENTO_DIAS = 7
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DURATIONS_FILE = os.path.join(SCRIPT_DIR, "product_durations.json")
@@ -200,6 +206,58 @@ def fetch_birthdays_today(cur, today: date) -> list[dict]:
     return results
 
 
+def fetch_reengajamento(cur, durations: dict, today: date) -> list[dict]:
+    by_days: dict[int, list[str]] = {}
+    for code, info in durations.items():
+        by_days.setdefault(info["dias"], []).append(code)
+
+    results = []
+    for dias, group_codes in by_days.items():
+        purchase_date = today - timedelta(days=dias + REENGAJAMENTO_DIAS)
+        cur.execute(
+            """
+            SELECT DISTINCT
+                c.nome,
+                c.ddd_celular,
+                c.celular,
+                c.ddd_telefone,
+                c.telefone
+            FROM detalhes_vendas dv
+            JOIN vendas v ON v.codigo_venda = dv.codigo_venda
+            LEFT JOIN clientes c ON c.cpf = v.cpf_cliente
+            WHERE dv.codigo_produto = ANY(%s)
+              AND v.data = %s
+              AND dv.status_produto_vendido = 'Válido'
+              AND v.status = 'Válido'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM vendas v2
+                JOIN detalhes_vendas dv2 ON dv2.codigo_venda = v2.codigo_venda
+                WHERE v2.cpf_cliente = v.cpf_cliente
+                  AND dv2.codigo_produto = dv.codigo_produto
+                  AND v2.data > %s
+                  AND v2.data <= CURRENT_DATE
+                  AND dv2.status_produto_vendido = 'Válido'
+                  AND v2.status = 'Válido'
+              )
+            """,
+            (group_codes, purchase_date, purchase_date),
+        )
+        for row in cur.fetchall():
+            nome, ddd_cel, celular, ddd_tel, telefone = row
+            telefone_completo = build_whatsapp_number(ddd_cel, celular, ddd_tel, telefone)
+            if not telefone_completo:
+                continue
+            results.append(
+                {
+                    "event": "reengajamento",
+                    "nome": nome,
+                    "telefone": telefone_completo,
+                }
+            )
+    return results
+
+
 def send_webhook(payload: dict) -> bool:
     try:
         resp = requests.post(WEBHOOK_URL, json=payload, timeout=15)
@@ -219,14 +277,16 @@ def run():
     conn = connect_db()
     cur = conn.cursor()
 
-    expiring  = fetch_expiring_today(cur, durations, today)
-    birthdays = fetch_birthdays_today(cur, today)
+    expiring     = fetch_expiring_today(cur, durations, today)
+    birthdays    = fetch_birthdays_today(cur, today)
+    reengajamento = fetch_reengajamento(cur, durations, today)
 
     cur.close()
     conn.close()
 
     log.info(f"📦 {len(expiring)} compras expiram hoje")
     log.info(f"🎂 {len(birthdays)} aniversariantes hoje")
+    log.info(f"🔁 {len(reengajamento)} clientes para reengajamento")
 
     ok = fail = 0
 
@@ -248,6 +308,16 @@ def run():
             ok += 1
         except requests.RequestException as e:
             log.error(f"Webhook aniversário falhou para {item['nome']}: {e}")
+            fail += 1
+
+    for item in reengajamento:
+        log.info(f"  🔁 {item['nome']} | telefone: {item['telefone']}")
+        try:
+            resp = requests.post(WEBHOOK_REENGAJAMENTO_URL, json=item, timeout=15)
+            resp.raise_for_status()
+            ok += 1
+        except requests.RequestException as e:
+            log.error(f"Webhook reengajamento falhou para {item['nome']}: {e}")
             fail += 1
 
     log.info(f"✅ {ok} webhooks enviados | ❌ {fail} falhas")
