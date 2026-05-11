@@ -2,7 +2,7 @@ import json
 import os
 import time
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import psycopg2
 import requests
@@ -26,6 +26,14 @@ WEBHOOK_REENGAJAMENTO_URL = os.environ.get(
 )
 
 REENGAJAMENTO_DIAS = 7
+BRT = timezone(timedelta(hours=-3))
+
+# (hora, minuto) BRT → função a executar
+SCHEDULE = [
+    (8,  0, "aniversario"),
+    (10, 0, "expiry"),
+    (14, 0, "reengajamento"),
+]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DURATIONS_FILE = os.path.join(SCRIPT_DIR, "product_durations.json")
@@ -316,28 +324,47 @@ def run_aniversario(cur, today: date) -> tuple[int, int]:
     return ok, fail
 
 
+def next_fire_time() -> tuple[datetime, str]:
+    """Retorna o próximo horário agendado e o nome do job."""
+    now = datetime.now(BRT)
+    candidates = []
+    for hour, minute, job in SCHEDULE:
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        candidates.append((target, job))
+    return min(candidates, key=lambda x: x[0])
+
+
 if __name__ == "__main__":
-    job = os.environ.get("JOB", "").strip().lower()
-    today = date.today()
-    log.info(f"🚀 Iniciando job='{job or 'todos'}' — {today}")
-
+    log.info("🟢 Serviço iniciado")
     durations = load_durations()
-    conn = connect_db()
-    c = conn.cursor()
 
-    ok = fail = 0
-    if job == "expiry":
-        ok, fail = run_expiry(c, durations, today)
-    elif job == "reengajamento":
-        ok, fail = run_reengajamento(c, durations, today)
-    elif job == "aniversario":
-        ok, fail = run_aniversario(c, today)
-    else:
-        o1, f1 = run_expiry(c, durations, today)
-        o2, f2 = run_reengajamento(c, durations, today)
-        o3, f3 = run_aniversario(c, today)
-        ok, fail = o1 + o2 + o3, f1 + f2 + f3
+    while True:
+        fire_at, job = next_fire_time()
+        wait_s = (fire_at - datetime.now(BRT)).total_seconds()
+        log.info(f"⏰ Próximo: {job} às {fire_at.strftime('%H:%M')} BRT — aguardando {wait_s/3600:.1f}h")
+        time.sleep(wait_s)
 
-    c.close()
-    conn.close()
-    log.info(f"✅ {ok} webhooks enviados | ❌ {fail} falhas")
+        today = datetime.now(BRT).date()
+        log.info(f"🚀 Executando job='{job}' — {today}")
+
+        try:
+            conn = connect_db()
+            c = conn.cursor()
+
+            ok = fail = 0
+            if job == "expiry":
+                ok, fail = run_expiry(c, durations, today)
+            elif job == "reengajamento":
+                ok, fail = run_reengajamento(c, durations, today)
+            elif job == "aniversario":
+                ok, fail = run_aniversario(c, today)
+
+            c.close()
+            conn.close()
+            log.info(f"✅ {ok} webhooks enviados | ❌ {fail} falhas")
+        except Exception as e:
+            log.error(f"💥 Erro no job '{job}': {e}")
+
+        time.sleep(70)
