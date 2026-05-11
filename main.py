@@ -106,8 +106,19 @@ def fetch_expiring_today(cur, durations: dict, today: date) -> list[dict]:
               AND v.data = %s
               AND dv.status_produto_vendido = 'Válido'
               AND v.status = 'Válido'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM vendas v2
+                JOIN detalhes_vendas dv2 ON dv2.codigo_venda = v2.codigo_venda
+                WHERE v2.cpf_cliente = v.cpf_cliente
+                  AND dv2.codigo_produto = dv.codigo_produto
+                  AND v2.data > %s
+                  AND v2.data <= CURRENT_DATE
+                  AND dv2.status_produto_vendido = 'Válido'
+                  AND v2.status = 'Válido'
+              )
             """,
-            (group_codes, purchase_date),
+            (group_codes, purchase_date, purchase_date),
         )
         for row in cur.fetchall():
             codigo = row[0].strip()
